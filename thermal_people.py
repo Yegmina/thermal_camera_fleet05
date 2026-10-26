@@ -133,7 +133,7 @@ def main():
         raise RuntimeError(f'Model has no person class: {model.names}')
     print(f'Model: {args.model.name}; device: {device}; GPU: {gpu_name}; input: {args.imgsz}; budget: {args.vram_gb} GiB', flush=True)
     predict_options = dict(conf=args.confidence, classes=person_ids, imgsz=args.imgsz,
-                           device=device, half=use_gpu, verbose=False)
+                           device=device, quantize=16 if use_gpu else 32, verbose=False)
     model.predict(np.zeros((512, 640, 3), dtype=np.uint8), **predict_options)
     if use_gpu:
         torch.cuda.synchronize(device)
