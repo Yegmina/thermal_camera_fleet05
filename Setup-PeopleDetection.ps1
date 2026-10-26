@@ -1,0 +1,62 @@
+$ErrorActionPreference = 'Stop'
+$uv = Join-Path $PSScriptRoot '.tools\uv\uv.exe'
+$environment = Join-Path $PSScriptRoot '.venv-gpu'
+$python = Join-Path $environment 'Scripts\python.exe'
+function Get-ThermalDownload {
+    param([string]$Url, [string]$Destination)
+    & curl.exe --fail --location --retry 3 --silent --show-error --output $Destination $Url
+    if ($LASTEXITCODE) { throw "Download failed: $Url" }
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot '.tools'), (Join-Path $PSScriptRoot 'models') | Out-Null
+if (-not (Test-Path -LiteralPath $uv)) {
+    $uvArchive = Join-Path $PSScriptRoot '.tools\uv.zip'
+    Get-ThermalDownload 'https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-pc-windows-msvc.zip' $uvArchive
+    Expand-Archive -LiteralPath $uvArchive -DestinationPath (Split-Path $uv) -Force
+}
+$ffmpeg = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '.tools') -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+if (-not $ffmpeg) {
+    $cameraArchive = Join-Path $PSScriptRoot '.tools\ffmpeg-release-essentials.zip'
+    Get-ThermalDownload 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' $cameraArchive
+    & tar.exe -xf $cameraArchive -C (Join-Path $PSScriptRoot '.tools')
+    if ($LASTEXITCODE) { throw 'Could not unpack the camera tools.' }
+}
+$models = @(
+    @{
+        File = 'yolo11l.pt'
+        Url = 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11l.pt'
+        Hash = '9ebd0e09d59811db4b1d61e2bc6730649608b1ac47f8dd01e2da6bca7c20023f'
+    },
+    @{
+        File = 'thermal-yolo11n.pt'
+        Url = 'https://huggingface.co/banghyunmin/thermal-people-yolov11n/resolve/fbeb08a979248fe3cbb2756f95401da98103956d/best.pt'
+        Hash = 'fdad65ed79d7fd4371e038aa3e43c7ac168addb40f256e316d9f00a78dfbf9a2'
+    },
+    @{
+        File = 'thermal-person.pt'
+        Url = 'https://huggingface.co/pitangent-ds/YOLOv8-human-detection-thermal/resolve/a5d30f1e8e185a54a83cb6288d38c806e303bdd2/model.pt'
+        Hash = '63181e6c024a8a218020932b516bfb9547130e03e07c8d4671cb2973df038bef'
+    }
+)
+foreach ($model in $models) {
+    $modelPath = Join-Path $PSScriptRoot ('models\' + $model.File)
+    if ((Test-Path -LiteralPath $modelPath) -and (Get-FileHash -LiteralPath $modelPath).Hash -eq $model.Hash) {
+        continue
+    }
+    $temporaryModel = $modelPath + '.download'
+    Get-ThermalDownload $model.Url $temporaryModel
+    if ((Get-FileHash -LiteralPath $temporaryModel).Hash -ne $model.Hash) {
+        throw "Model checksum mismatch: $($model.File)"
+    }
+    Move-Item -LiteralPath $temporaryModel -Destination $modelPath -Force
+}
+if (-not (Test-Path -LiteralPath $python)) {
+    & $uv venv --python 3.12 $environment
+    if ($LASTEXITCODE) { throw 'Could not create the GPU environment.' }
+}
+& $uv --system-certs pip install --python $python torch==2.9.1 torchvision==0.24.1 `
+    --index-url https://download.pytorch.org/whl/cu128
+if ($LASTEXITCODE) { throw 'Could not install CUDA PyTorch.' }
+& $uv --system-certs pip install --python $python -r (Join-Path $PSScriptRoot 'requirements.txt')
+if ($LASTEXITCODE) { throw 'Could not install the detection dependencies.' }
+& $python -c 'import torch; assert torch.cuda.is_available(); x=torch.ones(16).cuda(); print(torch.cuda.get_device_name(0)); print(x.sum().item())'
+if ($LASTEXITCODE) { throw 'The CUDA verification failed.' }

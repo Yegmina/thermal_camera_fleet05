@@ -1,0 +1,6 @@
+.tools/
+.venv/
+.venv-gpu/
+__pycache__/
+models/*.pt
+models/*.download
