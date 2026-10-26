@@ -11,7 +11,7 @@ import time
 import cv2
 import numpy as np
 import torch
-from ultralytics import YOLO
+from thermal_detector import ThermalDetector
 
 ROOT = Path(__file__).resolve().parent
 TITLE = 'Thermal Camera - People Detection'
@@ -92,9 +92,13 @@ def write_status(status):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--camera', default='ThermalCamera')
-    parser.add_argument('--model', type=Path, default=ROOT / 'models' / 'yolo11l.pt')
+    parser.add_argument('--model', type=Path, default=ROOT / 'models' / 'thermal-yolov5x-adam.pt')
     parser.add_argument('--device', default='cuda:0', help='cuda:0 (default), cpu, or auto.')
-    parser.add_argument('--imgsz', type=int, default=768)
+    parser.add_argument('--imgsz', type=int, default=640)
+    parser.add_argument('--tile-size', type=int, default=384)
+    parser.add_argument('--tile-overlap', type=int, default=128)
+    parser.add_argument('--batch-size', type=int, default=5)
+    parser.add_argument('--no-tiles', action='store_true', help='Use only the full-resolution full-frame pass.')
     parser.add_argument('--vram-gb', type=float, default=8.0,
                         help='GPU budget in GiB, including 1 GiB allowance for the CUDA runtime.')
     parser.add_argument('--confidence', type=float, default=0.5)
@@ -106,8 +110,12 @@ def main():
     args = parser.parse_args()
     if not 0.05 <= args.confidence <= 0.95:
         parser.error('Confidence must be between 0.05 and 0.95.')
-    if args.imgsz < 320 or args.imgsz % 32:
-        parser.error('Image size must be at least 320 and a multiple of 32.')
+    if args.imgsz < 640 or args.imgsz % 32:
+        parser.error('Image size must be at least 640 and a multiple of 32 to preserve camera resolution.')
+    if not 0 <= args.tile_overlap < args.tile_size <= args.imgsz:
+        parser.error('Tile overlap must be smaller than tile size, and tile size cannot exceed the model input.')
+    if not 1 <= args.batch_size <= 16:
+        parser.error('Batch size must be between 1 and 16.')
     if args.vram_gb < 2:
         parser.error('GPU budget must be at least 2 GiB.')
     torch.set_num_threads(min(8, os.cpu_count() or 4))
@@ -127,14 +135,11 @@ def main():
         torch.cuda.set_per_process_memory_fraction(allowance * 1024**3 / properties.total_memory, device)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = False
-    model = YOLO(str(args.model), task='detect')
-    person_ids = [int(i) for i, label in model.names.items() if label.lower() in ('person', 'human', 'people')]
-    if not person_ids:
-        raise RuntimeError(f'Model has no person class: {model.names}')
+    detector = ThermalDetector(args.model, device, args.imgsz, args.batch_size)
     print(f'Model: {args.model.name}; device: {device}; GPU: {gpu_name}; input: {args.imgsz}; budget: {args.vram_gb} GiB', flush=True)
-    predict_options = dict(conf=args.confidence, classes=person_ids, imgsz=args.imgsz,
-                           device=device, quantize=16 if use_gpu else 32, verbose=False)
-    model.predict(np.zeros((512, 640, 3), dtype=np.uint8), **predict_options)
+    print(f'Thermal training verified; parameters: {detector.parameters:,}; classes: {detector.names}', flush=True)
+    detector.detect(np.zeros((512, 640, 3), dtype=np.uint8), args.confidence,
+                    not args.no_tiles, args.tile_size, args.tile_overlap)
     if use_gpu:
         torch.cuda.synchronize(device)
     camera = Camera(args.camera)
@@ -149,7 +154,10 @@ def main():
     annotated = None
     status = {'model': args.model.name, 'device': device, 'gpu_name': gpu_name,
               'vram_budget_gib': args.vram_gb, 'half_precision': use_gpu,
-              'input_size': args.imgsz}
+              'input_size': args.imgsz, 'parameters': detector.parameters,
+              'thermal_trained': True, 'model_source': detector.metadata['source'],
+              'tiled': not args.no_tiles, 'tile_size': args.tile_size, 'tile_overlap': args.tile_overlap,
+              'source_resolution': [640, 512], 'downsampling': False}
     started = time.monotonic()
     last_status = 0
     if not args.headless:
@@ -165,15 +173,14 @@ def main():
                                           270: cv2.ROTATE_90_CLOCKWISE}[rotation])
             image = prepare(frame, invert)
             height, width = image.shape[:2]
-            predict_options['conf'] = confidence
-            result = model.predict(image, **predict_options)[0]
-            boxes = result.boxes
+            boxes = detector.detect(image, confidence, not args.no_tiles,
+                                    args.tile_size, args.tile_overlap)
             count = len(boxes)
             annotated = image.copy()
             detections = []
             for box in boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                score = float(box.conf[0])
+                x1, y1, x2, y2 = map(int, box[:4])
+                score = float(box[4])
                 detections.append({'box': [x1, y1, x2, y2], 'confidence': round(score, 3)})
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 240, 80), 2)
                 cv2.putText(annotated, f'Person {score:.0%}', (x1, max(48, y1 - 8)),
@@ -183,7 +190,7 @@ def main():
             cv2.rectangle(annotated, (0, 0), (width, 56), (20, 20, 20), -1)
             cv2.putText(annotated, f'People: {count}   |   {fps:.1f} FPS   |   {"GPU" if use_gpu else "CPU"}',
                         (12, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.57, (0, 240, 80), 1, cv2.LINE_AA)
-            cv2.putText(annotated, f'{args.model.stem}   |   Confidence: {confidence:.0%}',
+            cv2.putText(annotated, f'{detector.name} | {detector.last_input_count} views | Confidence: {confidence:.0%}',
                         (12, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (220, 220, 220), 1, cv2.LINE_AA)
             cv2.rectangle(annotated, (0, height - 25), (width, height), (20, 20, 20), -1)
             cv2.putText(annotated, 'Q/Esc: close  F: fullscreen  +/-: sensitivity  I: invert  R: rotate',
@@ -201,6 +208,8 @@ def main():
                               'device': device, 'gpu_name': gpu_name, 'model': args.model.name,
                               'input_size': args.imgsz, 'half_precision': use_gpu,
                               'vram_budget_gib': args.vram_gb, 'cuda_memory': memory,
+                              'views_per_frame': detector.last_input_count,
+                              'batch_size': detector.batch_size,
                               'rotation': rotation, 'detections': detections})
                 write_status(status)
                 last_status = time.monotonic()

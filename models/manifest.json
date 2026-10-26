@@ -1,0 +1,27 @@
+{
+  "thermal-yolov5x-adam.pt": {
+    "display_name": "Thermal YOLOv5x",
+    "backend": "yolov5",
+    "thermal_trained": true,
+    "training_input": [640, 640],
+    "training_epochs": 100,
+    "source": "https://huggingface.co/MAli-Farooq/Thermal_Object_Detection",
+    "revision": "0df98a0ed9e200be78a313f5f74d347a90a93a3c",
+    "archive_member": "v2/ADAM/ADAM-Xlarge/weights/best.pt",
+    "sha256": "2510bdbe3e294317b58c7f57ed315ffd46550d3354c9030652a04a31d29fb618"
+  },
+  "thermal-yolo11n.pt": {
+    "display_name": "Thermal YOLO11n",
+    "backend": "ultralytics",
+    "thermal_trained": true,
+    "source": "https://huggingface.co/banghyunmin/thermal-people-yolov11n",
+    "sha256": "fdad65ed79d7fd4371e038aa3e43c7ac168addb40f256e316d9f00a78dfbf9a2"
+  },
+  "thermal-person.pt": {
+    "display_name": "Thermal YOLOv8n",
+    "backend": "ultralytics",
+    "thermal_trained": true,
+    "source": "https://huggingface.co/pitangent-ds/YOLOv8-human-detection-thermal",
+    "sha256": "63181e6c024a8a218020932b516bfb9547130e03e07c8d4671cb2973df038bef"
+  }
+}

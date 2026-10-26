@@ -1,19 +1,18 @@
 ﻿# Thermal camera person detection
 
-Run `powershell -ExecutionPolicy Bypass -File .\Start-PeopleDetection.ps1` to open live GPU detection. The app selects the USB device named `ThermalCamera`, captures at 640 x 512 / 50 fps, adjusts contrast, and detects people locally on the NVIDIA GPU. Processing uses FP16, a 768-pixel model input, and an 8 GiB GPU memory budget. The window shows the actual detection speed and GPU mode. CUDA must be available; GPU mode reports an error if it cannot start.
+Run `powershell -ExecutionPolicy Bypass -File .\Setup-PeopleDetection.ps1` once, then `powershell -ExecutionPolicy Bypass -File .\Start-PeopleDetection.ps1` for live detection on the NVIDIA GPU. Setup downloads the camera tools, verifies the thermal weights, prepares the pinned YOLOv5 runtime, and installs CUDA-enabled PyTorch. The initial CUDA package download is about 2.7 GiB.
 
-The default model is **YOLO11l**, a larger detector with about 25 million parameters. Its official weights are trained on COCO visible-light images, so this is an experimental application to thermal imagery. It is filtered to the person class. Larger model size alone does not establish better accuracy on this camera. Check performance with people at the intended distances, including empty scenes, partial occlusion, and different thermal contrast.
+The default is **thermal-trained YOLOv5x with 88,474,028 parameters**, published by MAli-Farooq. The publisher's saved training configuration specifies the thermal dataset `thermal11.yaml`, 640 x 640 input, and 100 configured epochs. The checkpoint explicitly labels `person` as class 5. Its source revision, archive member, and SHA-256 are recorded in `models/manifest.json` and `models/SOURCE.md`. Every checkpoint must match an approved thermal entry and checksum. General-photo checkpoints are rejected.
 
-Two thermal-trained alternatives are installed:
+The USB camera supplies **640 x 512 at 50 fps**. At the default settings, each source frame produces:
 
-| Model file | Description |
-| --- | --- |
-| `thermal-yolo11n.pt` | Newer thermal person detector, published by banghyunmin, trained on the Roboflow People Detection Thermal dataset. |
-| `thermal-person.pt` | Original YOLOv8 nano thermal human detector, published by pitangent-ds. |
+1. One full-frame view, padded to 640 x 640 without shrinking any source pixels.
+2. Four 384 x 384 crops taken directly from the source image, with at least 128 pixels of overlap. Each crop is enlarged to the model's 640 x 640 input.
+3. A batch of all five views on the GPU. Boxes are mapped back to full-frame coordinates and combined with non-maximum suppression to remove overlapping duplicates.
 
-Choose one using `powershell -ExecutionPolicy Bypass -File .\Start-PeopleDetection.ps1 -Model thermal-yolo11n.pt`. Model provenance and source links are in `models/SOURCE.md`.
+The full-frame view helps with people who cross crop boundaries. Crops let smaller people occupy more of the model input. Upsampling does not create extra sensor detail. Every native pixel remains covered, and inputs that would shrink source pixels are rejected. Overlapping or partially visible people can still cause missed detections or duplicate boxes.
 
-Green boxes show detected people and confidence. The count is the number of boxes in the current frame, not a count of unique visitors. Controls:
+Green boxes show detected people and confidence. The count is the number of retained boxes in the current frame, not a count of unique visitors. Controls:
 
 - **F**: fullscreen.
 - **Q / Esc**: close.
@@ -21,12 +20,16 @@ Green boxes show detected people and confidence. The count is the number of boxe
 - **I**: invert thermal polarity.
 - **R**: rotate the view.
 
-The initial view rotates 90 degrees counterclockwise to match the camera's initially observed orientation. Aim the camera upright with full bodies visible when checking person detection. Reflections can create extra detections. The launcher also supports `-Confidence 0.6`, `-ImageSize 960`, and `-VramGB 8`.
+The initial view rotates 90 degrees counterclockwise. The launcher supports `-Confidence 0.6`, `-TileSize 384`, `-TileOverlap 128`, `-BatchSize 5`, `-ImageSize 640`, and `-VramGB 8`. Use `-NoTiles` for only the full-frame pass. Batch size is automatically reduced if PyTorch runs out of allocator space, while retaining every view.
 
-The application does not record video. Current detection status, GPU tensor memory measurements, and diagnostic logs are in `.tools/`. PyTorch GPU memory values do not include the CUDA context or other driver allocations. The allocator is limited to 7 GiB at the default budget, leaving 1 GiB for runtime overhead; this is not an operating-system-wide cap. The original plain viewer is available through `Start-ThermalCamera.ps1` after detection closes. Only one viewer can use the camera at a time.
+Two smaller thermal-trained alternatives remain available: `-Model thermal-yolo11n.pt` or `-Model thermal-person.pt`. They are filtered to the named person/human class and must pass the same checkpoint checksum checks.
 
-To recreate the GPU environment, run `powershell -ExecutionPolicy Bypass -File .\Setup-PeopleDetection.ps1`. It downloads uv and FFmpeg when missing, downloads and verifies the model weights, and installs Python 3.12, PyTorch 2.9.1 / torchvision 0.24.1 with CUDA 12.8, and `requirements.txt`. The initial CUDA download is about 2.7 GiB. The CPU environment is preserved separately in `.venv`; the GPU launcher uses `.venv-gpu`. Exact installed GPU versions are recorded in `requirements-gpu-lock.txt`.
+Measured on the RTX 5090 Laptop GPU with FP16, 640-pixel input, the full-frame pass and four crops in a batch of five: approximately **16 FPS and 944 MiB total GPU memory**. PyTorch reserved about 662 MiB, with a peak of about 429 MiB actively allocated. These are local performance measurements, not detection-accuracy scores. Validate people and empty scenes at the intended distances; the model is thermal-trained but has not been fine-tuned on this specific camera.
 
-Validated on the RTX 5090 Laptop GPU with YOLO11l, FP16, and 768-pixel input: approximately 27-30 FPS in the live viewer and 470 MiB total GPU memory reported by NVIDIA after the benchmark process exited. PyTorch reserved 180 MiB, including a peak of about 137 MiB actively allocated. The reference-image inference benchmark reached about 40 FPS; that excludes USB capture and display. These are performance checks, not measurements of detection accuracy. Memory and speed can change with input size, rotation, and other applications.
+The GPU allocator is capped at 7 GiB at the default 8 GiB budget, leaving 1 GiB for CUDA runtime overhead. This is not an operating-system-wide memory cap. Current status and memory measurements are in `.tools/detection-status.json`; performance can vary with image size, batch size, and other applications.
 
-For a CPU fallback, run `.\.venv\Scripts\python.exe thermal_people.py --device cpu --model models\thermal-person.pt --imgsz 640`. Ultralytics and its official weights use AGPL-3.0. Refer to each thermal model's source for its stated terms.
+The application does not record video. Camera snapshots used for diagnostics, downloaded binaries, weights, and virtual environments are ignored by Git. The original plain viewer remains available through `Start-ThermalCamera.ps1` after detection closes. Only one viewer can open the camera at a time.
+
+Run `.\.venv-gpu\Scripts\python.exe -m unittest test_thermal_tiling -v` for checks covering complete source-pixel coverage, batched crop processing, coordinate mapping, duplicate suppression, memory-budget fallback, and rejection of general-photo weights. Actual GPU inference was also checked against the publisher's thermal example with valid person boxes.
+
+The GPU environment uses Python 3.12 and PyTorch 2.9.1 / torchvision 0.24.1 with CUDA 12.8. Exact installed packages are recorded in `requirements-gpu-lock.txt`. Model and dependency license information is in `models/SOURCE.md`.
