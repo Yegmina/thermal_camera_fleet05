@@ -39,6 +39,75 @@ def merge_detections(detections, iou_threshold=0.45):
     return boxes[keep]
 
 
+def box_iou(first, second):
+    first, second = np.asarray(first), np.asarray(second)
+    intersection = np.maximum(0, np.minimum(first[2:4], second[2:4]) -
+                              np.maximum(first[:2], second[:2])).prod()
+    area_first = np.maximum(0, first[2:4] - first[:2]).prod()
+    area_second = np.maximum(0, second[2:4] - second[:2]).prod()
+    return float(intersection / max(area_first + area_second - intersection, 1e-6))
+
+
+def corroborate_detections(detections, verification, minimum_iou=0.25):
+    """Keep a primary box only when the independent thermal detector agrees."""
+    kept = [box for box in detections
+            if any(box_iou(box, other) >= minimum_iou for other in verification)]
+    return merge_detections([np.asarray(kept, dtype=np.float32).reshape(-1, 5)])
+
+
+class PersonConfirmation:
+    """Require consecutive observations; never draw boxes after they disappear."""
+    def __init__(self, frames=3):
+        if frames < 1:
+            raise ValueError('Confirmation needs at least one frame.')
+        self.frames = frames
+        self.previous = []
+
+    def update(self, detections):
+        remaining = list(self.previous)
+        current = []
+        confirmed = []
+        for box in sorted(detections, key=lambda b: -b[4]):
+            overlaps = [box_iou(box, old) for old, _ in remaining]
+            match = int(np.argmax(overlaps)) if overlaps else -1
+            hits = 1
+            if match >= 0 and overlaps[match] >= 0.25:
+                _, previous_hits = remaining.pop(match)
+                hits += previous_hits
+            current.append((box.copy(), min(hits, self.frames)))
+            if hits >= self.frames:
+                confirmed.append(box)
+        self.previous = current
+        return np.asarray(confirmed, dtype=np.float32).reshape(-1, 5)
+
+
+def prepare_detr_inputs(images, image_size, device, half):
+    """Normalize on the GPU, matching DETR's processor and bottom/right padding."""
+    resized = []
+    for image in images:
+        height, width = image.shape[:2]
+        scale = image_size / max(height, width)
+        if scale < 1:
+            raise ValueError('The inference input would shrink source pixels. Increase --imgsz.')
+        resized.append(cv2.cvtColor(cv2.resize(image, (round(width * scale), round(height * scale))),
+                                    cv2.COLOR_BGR2RGB))
+    height = max(image.shape[0] for image in resized)
+    width = max(image.shape[1] for image in resized)
+    batch = np.zeros((len(images), height, width, 3), dtype=np.uint8)
+    mask = np.zeros((len(images), height, width), dtype=np.uint8)
+    for index, image in enumerate(resized):
+        h, w = image.shape[:2]
+        batch[index, :h, :w] = image
+        mask[index, :h, :w] = 1
+    pixels = torch.from_numpy(batch).to(device).permute(0, 3, 1, 2).contiguous().float()
+    pixel_mask = torch.from_numpy(mask).to(device).long()
+    mean = pixels.new_tensor([.485, .456, .406]).view(1, 3, 1, 1)
+    std = pixels.new_tensor([.229, .224, .225]).view(1, 3, 1, 1)
+    pixels.div_(255).sub_(mean).div_(std)
+    pixels.mul_(pixel_mask[:, None])
+    return {'pixel_values': pixels.half() if half else pixels, 'pixel_mask': pixel_mask}
+
+
 class ThermalDetector:
     def __init__(self, weights, device='cuda:0', image_size=640, batch_size=5):
         weights = Path(weights).resolve()
@@ -59,7 +128,26 @@ class ThermalDetector:
         self.name = self.metadata['display_name']
         self.backend = self.metadata['backend']
         self.last_input_count = 0
-        if self.backend == 'yolov5':
+        if self.backend == 'detr':
+            from transformers import DetrConfig, DetrForObjectDetection, DetrImageProcessor
+            from safetensors.torch import load_file
+            config_path = ROOT / 'models' / self.metadata['config_file']
+            if hashlib.sha256(config_path.read_bytes()).hexdigest() != self.metadata['config_sha256']:
+                raise ValueError('DETR configuration checksum mismatch.')
+            config = DetrConfig.from_json_file(str(config_path))
+            config.use_pretrained_backbone = False
+            self.model = DetrForObjectDetection(config)
+            state = (load_file(str(weights)) if weights.suffix == '.safetensors'
+                     else torch.load(weights, map_location='cpu', weights_only=True))
+            self.model.load_state_dict(state, strict=True)
+            del state
+            self.model.eval().to(self.device)
+            if self.half:
+                self.model.half()
+            self.processor = DetrImageProcessor(do_resize=False)
+            self.names = {int(key): value for key, value in self.metadata['labels'].items()}
+            self.parameters = sum(p.numel() for p in self.model.parameters())
+        elif self.backend == 'yolov5':
             from thermal_runtime import prepare_runtime
             runtime = prepare_runtime()
             sys.path.insert(0, str(runtime))
@@ -100,6 +188,25 @@ class ThermalDetector:
 
     @torch.inference_mode()
     def predict_batch(self, images, confidence):
+        if self.backend == 'detr':
+            inputs = prepare_detr_inputs(images, self.image_size, self.device, self.half)
+            prediction = self.model(**inputs)
+            sizes = torch.tensor([image.shape[:2] for image in images], device=self.device)
+            decoded = self.processor.post_process_object_detection(prediction, threshold=confidence,
+                                                                   target_sizes=sizes)
+            results = []
+            for item, (height, width) in zip(decoded, sizes.tolist()):
+                valid = torch.zeros_like(item['labels'], dtype=torch.bool)
+                for class_id in self.person_ids:
+                    valid |= item['labels'] == class_id
+                boxes, scores = item['boxes'][valid].float(), item['scores'][valid].float()
+                boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, width)
+                boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, height)
+                valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+                boxes, scores = boxes[valid], scores[valid]
+                keep = nms(boxes, scores, 0.45)
+                results.append(torch.cat((boxes[keep], scores[keep, None]), dim=1).cpu().numpy())
+            return results
         if self.backend != 'yolov5':
             results = self.model.predict(images, conf=confidence, classes=self.person_ids,
                                          imgsz=self.image_size, device=str(self.device),

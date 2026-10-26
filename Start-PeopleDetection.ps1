@@ -1,7 +1,10 @@
 param(
     [ValidateRange(0.05, 0.95)]
-    [double]$Confidence = 0.5,
-    [string]$Model = 'thermal-yolov5x-adam.pt',
+    [double]$Confidence = 0.65,
+    [string]$Model = 'thermal-detr-r50.bin',
+    [string]$VerifyModel = 'thermal-person.pt',
+    [ValidateRange(1, 30)]
+    [int]$ConfirmFrames = 3,
     [ValidateSet(640, 768, 960, 1280)]
     [int]$ImageSize = 640,
     [ValidateRange(128, 1280)]
@@ -25,6 +28,7 @@ Get-Process ffplay -ErrorAction SilentlyContinue |
     Stop-Process
 $arguments = @((Join-Path $PSScriptRoot 'thermal_people.py'), '--confidence', $Confidence,
     '--model', (Join-Path $PSScriptRoot ('models\' + $Model)), '--device', 'cuda:0',
+    '--verify-model', (Join-Path $PSScriptRoot ('models\' + $VerifyModel)), '--confirm-frames', $ConfirmFrames,
     '--imgsz', $ImageSize, '--vram-gb', $VramGB, '--tile-size', $TileSize,
     '--tile-overlap', $TileOverlap, '--batch-size', $BatchSize)
 if ($NoTiles) { $arguments += '--no-tiles' }

@@ -3,4 +3,6 @@
 .venv-gpu/
 __pycache__/
 models/*.pt
+models/*.safetensors
+models/*.bin
 models/*.download

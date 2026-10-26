@@ -11,7 +11,7 @@ import time
 import cv2
 import numpy as np
 import torch
-from thermal_detector import ThermalDetector
+from thermal_detector import ThermalDetector, PersonConfirmation, corroborate_detections
 
 ROOT = Path(__file__).resolve().parent
 TITLE = 'Thermal Camera - People Detection'
@@ -92,7 +92,10 @@ def write_status(status):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--camera', default='ThermalCamera')
-    parser.add_argument('--model', type=Path, default=ROOT / 'models' / 'thermal-yolov5x-adam.pt')
+    parser.add_argument('--model', type=Path, default=ROOT / 'models' / 'thermal-detr-r50.bin')
+    parser.add_argument('--verify-model', type=Path, default=ROOT / 'models' / 'thermal-person.pt')
+    parser.add_argument('--verification-confidence', type=float, default=0.4)
+    parser.add_argument('--confirm-frames', type=int, default=3)
     parser.add_argument('--device', default='cuda:0', help='cuda:0 (default), cpu, or auto.')
     parser.add_argument('--imgsz', type=int, default=640)
     parser.add_argument('--tile-size', type=int, default=384)
@@ -101,7 +104,7 @@ def main():
     parser.add_argument('--no-tiles', action='store_true', help='Use only the full-resolution full-frame pass.')
     parser.add_argument('--vram-gb', type=float, default=8.0,
                         help='GPU budget in GiB, including 1 GiB allowance for the CUDA runtime.')
-    parser.add_argument('--confidence', type=float, default=0.5)
+    parser.add_argument('--confidence', type=float, default=0.65)
     parser.add_argument('--rotation', type=int, choices=(0, 90, 180, 270), default=90,
                         help='Counterclockwise rotation to orient this camera upright.')
     parser.add_argument('--duration', type=float, default=0, help='Stop after this many seconds; 0 runs until closed.')
@@ -110,6 +113,8 @@ def main():
     args = parser.parse_args()
     if not 0.05 <= args.confidence <= 0.95:
         parser.error('Confidence must be between 0.05 and 0.95.')
+    if not 0.05 <= args.verification_confidence <= 0.95 or not 1 <= args.confirm_frames <= 30:
+        parser.error('Verification confidence must be 0.05 to 0.95; confirmation frames must be 1 to 30.')
     if args.imgsz < 640 or args.imgsz % 32:
         parser.error('Image size must be at least 640 and a multiple of 32 to preserve camera resolution.')
     if not 0 <= args.tile_overlap < args.tile_size <= args.imgsz:
@@ -136,9 +141,13 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = False
     detector = ThermalDetector(args.model, device, args.imgsz, args.batch_size)
+    verifier = ThermalDetector(args.verify_model, device, args.imgsz, args.batch_size)
+    confirmation = PersonConfirmation(args.confirm_frames)
     print(f'Model: {args.model.name}; device: {device}; GPU: {gpu_name}; input: {args.imgsz}; budget: {args.vram_gb} GiB', flush=True)
     print(f'Thermal training verified; parameters: {detector.parameters:,}; classes: {detector.names}', flush=True)
     detector.detect(np.zeros((512, 640, 3), dtype=np.uint8), args.confidence,
+                    not args.no_tiles, args.tile_size, args.tile_overlap)
+    verifier.detect(np.zeros((512, 640, 3), dtype=np.uint8), args.verification_confidence,
                     not args.no_tiles, args.tile_size, args.tile_overlap)
     if use_gpu:
         torch.cuda.synchronize(device)
@@ -155,6 +164,8 @@ def main():
     status = {'model': args.model.name, 'device': device, 'gpu_name': gpu_name,
               'vram_budget_gib': args.vram_gb, 'half_precision': use_gpu,
               'input_size': args.imgsz, 'parameters': detector.parameters,
+              'verification_model': args.verify_model.name, 'verification_parameters': verifier.parameters,
+              'verification_confidence': args.verification_confidence, 'confirm_frames': args.confirm_frames,
               'thermal_trained': True, 'model_source': detector.metadata['source'],
               'tiled': not args.no_tiles, 'tile_size': args.tile_size, 'tile_overlap': args.tile_overlap,
               'source_resolution': [640, 512], 'downsampling': False}
@@ -175,6 +186,12 @@ def main():
             height, width = image.shape[:2]
             boxes = detector.detect(image, confidence, not args.no_tiles,
                                     args.tile_size, args.tile_overlap)
+            raw_count = len(boxes)
+            verified = verifier.detect(image, args.verification_confidence, not args.no_tiles,
+                                       args.tile_size, args.tile_overlap)
+            boxes = corroborate_detections(boxes, verified)
+            corroborated_count = len(boxes)
+            boxes = confirmation.update(boxes)
             count = len(boxes)
             annotated = image.copy()
             detections = []
@@ -190,7 +207,7 @@ def main():
             cv2.rectangle(annotated, (0, 0), (width, 56), (20, 20, 20), -1)
             cv2.putText(annotated, f'People: {count}   |   {fps:.1f} FPS   |   {"GPU" if use_gpu else "CPU"}',
                         (12, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.57, (0, 240, 80), 1, cv2.LINE_AA)
-            cv2.putText(annotated, f'{detector.name} | {detector.last_input_count} views | Confidence: {confidence:.0%}',
+            cv2.putText(annotated, f'{detector.name} + thermal check | {confidence:.0%} | {args.confirm_frames} frames',
                         (12, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (220, 220, 220), 1, cv2.LINE_AA)
             cv2.rectangle(annotated, (0, height - 25), (width, height), (20, 20, 20), -1)
             cv2.putText(annotated, 'Q/Esc: close  F: fullscreen  +/-: sensitivity  I: invert  R: rotate',
@@ -210,6 +227,8 @@ def main():
                               'vram_budget_gib': args.vram_gb, 'cuda_memory': memory,
                               'views_per_frame': detector.last_input_count,
                               'batch_size': detector.batch_size,
+                              'verification_batch_size': verifier.batch_size,
+                              'primary_candidates': raw_count, 'corroborated_candidates': corroborated_count,
                               'rotation': rotation, 'detections': detections})
                 write_status(status)
                 last_status = time.monotonic()
@@ -234,8 +253,10 @@ def main():
                     confidence = min(0.95, round(confidence + 0.05, 2))
                 elif key == ord('i'):
                     invert = not invert
+                    confirmation = PersonConfirmation(args.confirm_frames)
                 elif key == ord('r'):
                     rotation = (rotation + 90) % 360
+                    confirmation = PersonConfirmation(args.confirm_frames)
     finally:
         camera.close()
         cv2.destroyAllWindows()

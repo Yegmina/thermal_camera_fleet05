@@ -22,6 +22,11 @@ if (-not $ffmpeg) {
 }
 $models = @(
     @{
+        File = 'thermal-detr-r50.bin'
+        Url = 'https://huggingface.co/faldeus0092/detr-finetuned-thermal-dogs-and-people/resolve/f7c9ff88dfb256c9fdb36e292046439c7f97e21c/pytorch_model.bin?download=true'
+        Hash = '8c10905ad0d26d046eddb664da6cec504fb2ba2c2e7bd8d2306bc926a99cf909'
+    },
+    @{
         File = 'thermal-yolo11n.pt'
         Url = 'https://huggingface.co/banghyunmin/thermal-people-yolov11n/resolve/fbeb08a979248fe3cbb2756f95401da98103956d/best.pt'
         Hash = 'fdad65ed79d7fd4371e038aa3e43c7ac168addb40f256e316d9f00a78dfbf9a2'

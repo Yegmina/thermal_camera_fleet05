@@ -1,6 +1,24 @@
-﻿# Thermal checkpoint sources
+ï»¿# Thermal checkpoint sources
 
-## Default: thermal YOLOv5x
+## Default: thermal DETR ResNet-50
+
+- Publisher: [faldeus0092/detr-finetuned-thermal-dogs-and-people](https://huggingface.co/faldeus0092/detr-finetuned-thermal-dogs-and-people).
+- Pinned revision: `f7c9ff88dfb256c9fdb36e292046439c7f97e21c`.
+- Selected file: `pytorch_model.bin`, 166,625,621 bytes, saved as `thermal-detr-r50.bin`.
+- SHA-256: `8c10905ad0d26d046eddb664da6cec504fb2ba2c2e7bd8d2306bc926a99cf909`.
+- Actual loaded parameter count: 41,502,152. The checkpoint state dictionary loads strictly with PyTorch `weights_only=True` after checksum verification.
+- The model card explicitly identifies the training data as Roboflow Thermal Dogs and People, with 142 training images, 41 evaluation images, and 68 epochs. That is a small thermal fine-tuning dataset; camera-specific generalization is unproven.
+- The pinned [training notebook](https://huggingface.co/faldeus0092/detr-finetuned-thermal-dogs-and-people/blob/f7c9ff88dfb256c9fdb36e292046439c7f97e21c/detr-finetuned-thermal-dogs-and-people.ipynb) explicitly defines `id2label = {0: "dogs-person", 1: "dog", 2: "person"}`. Only class 2 is used. The saved config has anonymous label names, so the notebook's explicit mapping is recorded in the manifest.
+- Original configuration: `thermal-detr-r50-config.json`; SHA-256 `aa86d4795ec53a3b389ad9d0dfd5c51fb6ad9b1c67e97d2812660f5381171157`. Original normalization/resize reference: `thermal-detr-r50-processor.json` (shortest edge 800, maximum 1333). Our default uses maximum edge 640 and source-native overlapping crops, preserving all sensor pixels. It is not a claim that the model was trained at our inference resolution.
+- Transformers uses Apache-2.0. The fine-tuned checkpoint's model card does not declare a license and describes its intended purpose as learning. The independent thermal YOLO verifier uses AGPL-3.0.
+
+The inference backend uses Transformers 4.57.6 and the checkpoint's native Transformers ResNet backbone, with automatic pretrained-backbone downloads disabled. GPU normalization is checked against `DetrImageProcessor`; the official `post_process_object_detection` maps boxes to original image dimensions.
+
+The default independent verifier is `thermal-person.pt` below. Both models process the full frame plus four overlapping crops; their final boxes must overlap by at least 0.25 IoU. Three consecutive observations are required. These filters trade recall and confirmation delay for fewer unsupported detections; persistent false positives can still pass.
+
+Two alternatives were tested and excluded: the aerial thermal RT-DETR-L from `Kiuyha/rtdetrv2-human-detection-thermal-uav` missed the ground-level reference people, and `Inishds/detr-resnet-101-dc5-FLIR-data-set` did not document whether its FLIR training data used thermal or visible frames. Neither is an approved manifest entry or a setup download.
+
+## Legacy alternative: thermal YOLOv5x
 
 - Publisher: [MAli-Farooq/Thermal_Object_Detection](https://huggingface.co/MAli-Farooq/Thermal_Object_Detection).
 - Related code and research: [Thermal-YOLO and model optimization](https://github.com/MAli-Farooq/Thermal-YOLO-And-Model-Optimization-Using-TensorFlowLite).
