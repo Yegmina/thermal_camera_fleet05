@@ -207,7 +207,13 @@ def main():
             if not args.headless:
                 cv2.imshow(TITLE, annotated)
                 key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord('q')) or cv2.getWindowProperty(TITLE, cv2.WND_PROP_VISIBLE) < 1:
+                if key in (27, ord('q')):
+                    break
+                try:
+                    visible = cv2.getWindowProperty(TITLE, cv2.WND_PROP_VISIBLE)
+                except cv2.error:
+                    break
+                if visible < 1:
                     break
                 if key == ord('f'):
                     fullscreen = not fullscreen
